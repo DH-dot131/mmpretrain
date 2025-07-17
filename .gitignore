@@ -148,3 +148,6 @@ checkpoint
 model_params.txt
 *.ckpt*
 results.txt
+
+# work_dirs
+work_dirs/

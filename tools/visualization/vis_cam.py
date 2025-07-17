@@ -149,8 +149,10 @@ def init_cam(method, model, target_layers, use_cuda, reshape_transform):
     """Construct the CAM object once, In order to be compatible with
     mmpretrain, here we modify the ActivationsAndGradients object."""
     GradCAM_Class = METHOD_MAP[method.lower()]
+    #cam = GradCAM_Class(
+        #model=model, target_layers=target_layers, use_cuda=use_cuda)
     cam = GradCAM_Class(
-        model=model, target_layers=target_layers, use_cuda=use_cuda)
+        model=model, target_layers=target_layers)
     # Release the original hooks in ActivationsAndGradients to use
     # ActivationsAndGradients.
     cam.activations_and_grads.release()

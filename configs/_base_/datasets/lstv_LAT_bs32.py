@@ -15,6 +15,20 @@ train_pipeline = [
     dict(type='Resize', scale=224),
     dict(type='Rotate', angle = 10),
     dict(type='RandomFlip', prob=0.5, direction='horizontal'),
+        dict(
+        type='ColorJitter',
+        brightness=0.2,   # 밝기 변화 범위 (0~1)
+        contrast=0.2,     # 대비 변화 범위 (0~1)
+        saturation=0.0,   # 흑백이므로 0
+        hue=0.0           # 흑백이므로 0
+    ),
+    #     dict(
+    #     type='RandomErasing',
+    #     erase_prob=0.3,   # 30% 확률로 일부 영역을 지움
+    #     mode='rand',
+    #     min_area_ratio=0.02,
+    #     max_area_ratio=0.2
+    # ),
     dict(type='PackInputs'),
 ]
 

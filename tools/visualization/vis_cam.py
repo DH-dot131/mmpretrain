@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
 import copy
+import gc
 import math
 import pkg_resources
 from functools import partial
@@ -8,6 +9,7 @@ from pathlib import Path
 
 import mmcv
 import numpy as np
+import torch
 import torch.nn as nn
 from mmcv.transforms import Compose
 from mmengine.config import Config, DictAction
@@ -40,9 +42,23 @@ METHOD_MAP.update({
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Visualize CAM')
-    parser.add_argument('img', help='Image file')
+    parser.add_argument('img', nargs='?', default=None, help='Image file (for single image mode)')
     parser.add_argument('config', help='Config file')
     parser.add_argument('checkpoint', help='Checkpoint file')
+    parser.add_argument(
+        '--batch-file',
+        type=str,
+        help='Text file containing image paths and labels for batch processing '
+        '(format: "image_path label" per line)')
+    parser.add_argument(
+        '--out-dir',
+        type=Path,
+        help='Output directory for batch processing (CAM images will be saved here)')
+    parser.add_argument(
+        '--clear-cache-interval',
+        type=int,
+        default=10,
+        help='Clear GPU cache every N images during batch processing (default: 10)')
     parser.add_argument(
         '--target-layers',
         default=[],
@@ -108,6 +124,12 @@ def parse_args():
     if args.method.lower() not in METHOD_MAP.keys():
         raise ValueError(f'invalid CAM type {args.method},'
                          f' supports {", ".join(list(METHOD_MAP.keys()))}.')
+    
+    # Validate arguments
+    if args.batch_file and not args.out_dir:
+        raise ValueError('--out-dir is required when using --batch-file')
+    if not args.batch_file and not args.img:
+        raise ValueError('Either provide an image file or use --batch-file for batch processing')
 
     return args
 
@@ -184,8 +206,8 @@ def show_cam_grad(grayscale_cam, src_img, title, out_path=None):
         mmcv.imwrite(visualization_img, str(out_path))
 
         # 2. 순수 히트맵도 함께 저장
-        heatmap_path = str(out_path).replace('.jpg', '_heatmap.npy')
-        np.save(heatmap_path, grayscale_cam)
+        # heatmap_path = str(out_path).replace('.jpg', '_heatmap.npy')
+        # np.save(heatmap_path, grayscale_cam)
     else:
         mmcv.imshow(visualization_img, win_name=title)
 
@@ -222,6 +244,41 @@ def get_default_target_layers(model, args):
     return [layer]
 
 
+def clear_memory():
+    """Clear GPU memory cache and run garbage collection."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def process_single_image(img_path, label, model, transforms, cam_calculator, 
+                         args, grad_cam_v):
+    """Process a single image and generate CAM visualization."""
+    # Apply transform and prepare data
+    data = transforms({'img_path': img_path})
+    src_img = copy.deepcopy(data['inputs']).numpy().transpose(1, 2, 0)
+    data = model.data_preprocessor(default_collate([data]), False)
+    
+    # Prepare target category
+    targets = None
+    if label is not None:
+        if digit_version(grad_cam_v) >= digit_version('1.3.7'):
+            from pytorch_grad_cam.utils.model_targets import \
+                ClassifierOutputTarget
+            targets = [ClassifierOutputTarget(label)]
+        else:
+            targets = [label]
+    
+    # Calculate CAM
+    grayscale_cam = cam_calculator(
+        data['inputs'],
+        targets,
+        eigen_smooth=args.eigen_smooth,
+        aug_smooth=args.aug_smooth)
+    
+    return grayscale_cam, src_img
+
+
 def main():
     args = parse_args()
     cfg = Config.fromfile(args.config)
@@ -235,12 +292,9 @@ def main():
         print('\n Please remove `--preview-model` to get the CAM.')
         return
 
-    # apply transform and perpare data
+    # apply transform
     transforms = Compose(
         [TRANSFORMS.build(t) for t in cfg.test_dataloader.dataset.pipeline])
-    data = transforms({'img_path': args.img})
-    src_img = copy.deepcopy(data['inputs']).numpy().transpose(1, 2, 0)
-    data = model.data_preprocessor(default_collate([data]), False)
 
     # build target layers
     if args.target_layers:
@@ -252,29 +306,67 @@ def main():
 
     # init a cam grad calculator
     use_cuda = ('cuda' in args.device)
-    cam = init_cam(args.method, model, target_layers, use_cuda,
-                   partial(reshape_transform, model=model, args=args))
+    cam_calculator = init_cam(args.method, model, target_layers, use_cuda,
+                              partial(reshape_transform, model=model, args=args))
 
-    # warp the target_category with ClassifierOutputTarget in grad_cam>=1.3.7,
-    # to fix the bug in #654.
-    targets = None
-    if args.target_category:
-        grad_cam_v = pkg_resources.get_distribution('grad_cam').version
-        if digit_version(grad_cam_v) >= digit_version('1.3.7'):
-            from pytorch_grad_cam.utils.model_targets import \
-                ClassifierOutputTarget
-            targets = [ClassifierOutputTarget(c) for c in args.target_category]
+    # Get grad_cam version for compatibility
+    grad_cam_v = pkg_resources.get_distribution('grad_cam').version
+
+    try:
+        # Batch processing mode
+        if args.batch_file:
+            print(f"Batch processing mode: {args.batch_file}")
+            args.out_dir.mkdir(parents=True, exist_ok=True)
+            
+            with open(args.batch_file, 'r') as f:
+                lines = [line.strip() for line in f if line.strip()]
+            
+            total = len(lines)
+            print(f"Processing {total} images...")
+            
+            for idx, line in enumerate(lines, 1):
+                parts = line.split()
+                img_path = parts[0]
+                label = int(parts[1]) if len(parts) > 1 else None
+                
+                img = Path(img_path)
+                save_path = args.out_dir / f"{img.stem}_cam.jpg"
+                
+                print(f"[{idx}/{total}] Processing: {img.name}")
+                
+                # Process image
+                grayscale_cam, src_img = process_single_image(
+                    img_path, label, model, transforms, cam_calculator,
+                    args, grad_cam_v)
+                
+                # Save result
+                show_cam_grad(grayscale_cam, src_img, 
+                             title=args.method, out_path=save_path)
+                
+                # Clear memory periodically
+                if idx % args.clear_cache_interval == 0:
+                    print(f"  -> Clearing GPU cache (every {args.clear_cache_interval} images)")
+                    clear_memory()
+            
+            print(f"Batch processing completed! Results saved to: {args.out_dir}")
+        
+        # Single image mode
         else:
-            targets = args.target_category
-
-    # calculate cam grads and show|save the visualization image
-    grayscale_cam = cam(
-        data['inputs'],
-        targets,
-        eigen_smooth=args.eigen_smooth,
-        aug_smooth=args.aug_smooth)
-    show_cam_grad(
-        grayscale_cam, src_img, title=args.method, out_path=args.save_path)
+            label = args.target_category[0] if args.target_category else None
+            
+            grayscale_cam, src_img = process_single_image(
+                args.img, label, model, transforms, cam_calculator,
+                args, grad_cam_v)
+            
+            show_cam_grad(grayscale_cam, src_img, 
+                         title=args.method, out_path=args.save_path)
+    
+    finally:
+        # Clean up resources
+        print("Cleaning up resources...")
+        del model
+        del cam_calculator
+        clear_memory()
 
 
 if __name__ == '__main__':

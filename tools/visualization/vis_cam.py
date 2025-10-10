@@ -180,7 +180,12 @@ def show_cam_grad(grayscale_cam, src_img, title, out_path=None):
         src_img, grayscale_cam, use_rgb=False)
 
     if out_path:
+        # 1. overlay 이미지 저장
         mmcv.imwrite(visualization_img, str(out_path))
+
+        # 2. 순수 히트맵도 함께 저장
+        heatmap_path = str(out_path).replace('.jpg', '_heatmap.npy')
+        np.save(heatmap_path, grayscale_cam)
     else:
         mmcv.imshow(visualization_img, win_name=title)
 

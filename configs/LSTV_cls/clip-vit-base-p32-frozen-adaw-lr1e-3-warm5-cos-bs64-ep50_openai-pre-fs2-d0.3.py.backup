@@ -1,0 +1,244 @@
+_base_ = [
+    '../_base_/datasets/lstv_LAT_bs32.py',
+    '../_base_/schedules/lstv_bs256.py', 
+    '../_base_/default_runtime.py'
+]
+
+import os, inspect
+
+# 현재 실행 중인 config 파일 경로
+_config_path = inspect.getfile(inspect.currentframe())
+# 파일명만 추출 (확장자 .py 제외)
+_cfg_name = os.path.splitext(os.path.basename(_config_path))[0]
+
+_fold = 2
+# work_dir에 동적으로 추가
+work_dir = os.path.join(
+    '..', 'work_dirs', 'lstv_classification_v2', _cfg_name, 'fold_' + str(_fold)
+)
+
+# CLIP pretrained weight 경로 (OpenAI CLIP ViT-Base-Patch32)
+load_from = 'https://download.openmmlab.com/mmclassification/v0/clip/clip-vit-base-p32_openai-pre_3rdparty_in1k_20221220-a0182ba9.pth'
+
+# model settings
+model = dict(
+    type='ImageClassifier',
+    backbone=dict(
+        type='VisionTransformer',
+        arch='b',  # base: 768 dim, 12 layers
+        img_size=224,
+        patch_size=32,
+        pre_norm=True,  # CLIP uses pre-normalization
+        frozen_stages=12,  # freeze all 12 transformer layers (전체 backbone freeze)
+        init_cfg=dict(
+            type='Pretrained',
+            checkpoint=load_from,
+            prefix='backbone.'
+        ),
+    ),
+    neck=None,
+    head=dict(
+        type='StackedLinearClsHead',  # Hidden layer 추가 (768 -> 512 -> 2)
+        num_classes=2,
+        in_channels=768,  # ViT-Base output dimension
+        mid_channels=[512],  # Hidden layer dimension
+        dropout_rate=0.3,  # Dropout after hidden layer
+        loss=dict(
+            type='LabelSmoothLoss',
+            label_smooth_val=0.1,
+            num_classes=2,
+            reduction='mean',
+            loss_weight=1.0
+        ),
+    )
+)
+
+# data preprocessor - CLIP specific normalization
+data_preprocessor = dict(
+    num_classes=2,
+    # CLIP normalization parameters (NOT ImageNet!)
+    mean=[0.48145466 * 255, 0.4578275 * 255, 0.40821073 * 255],  # CLIP mean
+    std=[0.26862954 * 255, 0.26130258 * 255, 0.27577711 * 255],  # CLIP std
+    # convert image from BGR to RGB
+    to_rgb=True,
+)
+
+# dataset settings
+dataset_type = 'CustomDataset'
+
+train_pipeline = [
+    dict(type='LoadImageFromFile'),
+    dict(type='Resize', scale=224),
+    dict(type='Rotate', angle=10),
+    dict(type='RandomFlip', prob=0.5, direction='horizontal'),
+    dict(
+        type='ColorJitter',
+        brightness=0.2,
+        contrast=0.2,
+        saturation=0.0,  # grayscale
+        hue=0.0          # grayscale
+    ),
+    dict(type='PackInputs'),
+]
+
+test_pipeline = [
+    dict(type='LoadImageFromFile'),
+    dict(type='Resize', scale=224),
+    dict(type='PackInputs'),
+]
+
+base_dataset_train = dict(
+    type=dataset_type,
+    data_root='',
+    ann_file='../data/LSTV_classification/LAT_v2/train+val_backup.txt',
+    pipeline=train_pipeline,
+)
+
+base_dataset_val = dict(
+    type=dataset_type,
+    data_root='',
+    ann_file='../data/LSTV_classification/LAT_v2/train+val_backup.txt',
+    pipeline=test_pipeline,
+)
+
+# K-Fold Cross Validation
+train_dataloader = dict(
+    batch_size=64,
+    num_workers=8,
+    dataset=dict(
+        type='KFoldDataset',
+        dataset=base_dataset_train,
+        fold=_fold,
+        num_splits=5,
+        test_mode=False,
+        seed=42
+    ),
+    sampler=dict(type='DefaultSampler', shuffle=True),
+)
+
+val_dataloader = dict(
+    batch_size=64,
+    num_workers=8,
+    dataset=dict(
+        type='KFoldDataset',
+        dataset=base_dataset_val,
+        fold=_fold,
+        num_splits=5,
+        test_mode=True,
+        seed=42
+    ),
+    sampler=dict(type='DefaultSampler', shuffle=False),
+)
+
+test_dataloader = dict(
+    batch_size=64,
+    num_workers=8,
+    dataset=dict(
+        type=dataset_type,
+        data_root='',
+        ann_file='../data/LSTV_classification/LAT_v2/test_backup.txt',
+        pipeline=test_pipeline
+    ),
+    sampler=dict(type='DefaultSampler', shuffle=False),
+)
+
+# optimizer
+# Head만 학습하므로 learning rate를 조금 더 크게 설정 가능
+optim_wrapper = dict(
+    type='AmpOptimWrapper',
+    loss_scale=512.0,
+    optimizer=dict(
+        type='AdamW',
+        lr=1e-3,  # Head only training이므로 더 큰 lr 사용 가능
+        weight_decay=0.01
+    ),
+)
+
+# learning rate scheduler
+param_scheduler = [
+    dict(
+        type='CosineAnnealingLR',
+        T_max=50,
+        by_epoch=True,
+        begin=0,
+        end=50,
+        eta_min=1e-6
+    ),
+]
+
+# training settings
+train_cfg = dict(by_epoch=True, max_epochs=50, val_interval=1)
+
+# hooks
+default_hooks = dict(
+    checkpoint=dict(
+        type='CheckpointHook',
+        interval=1,
+        by_epoch=True,
+        save_best='single-label/f1-score',  # F1-score를 기준으로 best 모델 저장
+        rule='greater',
+        max_keep_ckpts=5,
+        save_last=True
+    ),
+    visualization=dict(
+        enable=False,
+        out_dir=work_dir + '/vis_val',
+        interval=1,
+        type='VisualizationHook'
+    )
+)
+
+# evaluation settings
+val_evaluator = [
+    dict(type='Accuracy', thrs=0.5, collect_device='gpu'),
+    dict(
+        type='SingleLabelMetric',
+        thrs=0.5,
+        num_classes=2,
+        average='macro',  # macro average로 f1-score 하나의 값 출력
+        collect_device='gpu'
+    ),
+    dict(
+        type='SingleLabelMetric',
+        thrs=0.5,
+        num_classes=2,
+        average=None,  # classwise 값도 함께 출력 (모니터링용)
+        collect_device='gpu'
+    ),
+    dict(
+        type='ConfusionMatrix',
+        num_classes=2,
+        collect_device='gpu'
+    )
+]
+
+test_evaluator = [
+    dict(type='Accuracy', thrs=0.5, collect_device='gpu'),
+    dict(
+        type='SingleLabelMetric',
+        thrs=0.5,
+        num_classes=2,
+        average='macro',  # macro average
+        collect_device='gpu'
+    ),
+    dict(
+        type='SingleLabelMetric',
+        thrs=0.5,
+        num_classes=2,
+        average=None,  # classwise
+        collect_device='gpu'
+    ),
+    dict(
+        type='ConfusionMatrix',
+        num_classes=2,
+        collect_device='gpu'
+    ),
+    dict(
+        out_file_path=work_dir + '/results.pkl',
+        type='DumpResults'
+    ),
+]
+
+# runtime settings
+auto_scale_lr = dict(base_batch_size=256)
+

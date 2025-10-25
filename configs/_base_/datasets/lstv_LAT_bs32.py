@@ -39,11 +39,18 @@ test_pipeline = [
     dict(type='Resize', scale=224),
     dict(type='PackInputs'),
 ]
-base_dataset = dict(
+base_dataset_train = dict(
     type=dataset_type,
     data_root='',
     ann_file= '../data/LSTV_classification/LAT_v2/train+val.txt',
     pipeline=train_pipeline,
+)
+
+base_dataset_val = dict(
+    type=dataset_type,
+    data_root='',
+    ann_file= '../data/LSTV_classification/LAT_v2/train+val.txt',
+    pipeline=test_pipeline,
 )
 '''
 train_dataloader = dict(
@@ -75,7 +82,7 @@ train_dataloader = dict(
     num_workers=8,
     dataset=dict(
         type='KFoldDataset',
-        dataset=base_dataset,
+        dataset=base_dataset_train,
         fold=0,
         num_splits=5,
         test_mode=False,    # val fold
@@ -89,7 +96,7 @@ val_dataloader = dict(
     num_workers=8,
     dataset=dict(
         type='KFoldDataset',
-        dataset=base_dataset,
+        dataset=base_dataset_val,
         fold=0,
         num_splits=5,
         test_mode=True,    # val fold
@@ -111,7 +118,8 @@ test_dataloader = dict(
 )
 
 # evaluation settings
-val_evaluator = [dict(type='SingleLabelMetric', 
+val_evaluator = [dict(type='Accuracy', thrs=0.5, collect_device='gpu'),
+                dict(type='SingleLabelMetric', 
                      thrs = 0.5, 
                      num_classes=2, 
                      average = None,
@@ -120,7 +128,8 @@ val_evaluator = [dict(type='SingleLabelMetric',
                  dict(type='ConfusionMatrix',
                      num_classes=2,
                      collect_device='gpu'
-                     )]
+                     )
+                 ]
 
 # If you want standard test, please manually configure the test dataset
 

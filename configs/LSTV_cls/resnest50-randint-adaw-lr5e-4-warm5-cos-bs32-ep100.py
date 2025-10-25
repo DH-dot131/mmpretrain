@@ -4,31 +4,44 @@ _base_ = [
 ]
 
 
+import os, inspect
 
-# schedule settings
-optim_wrapper = dict(
-    loss_scale=512.0,
-    optimizer=dict(lr=5e-4, type='AdamW', weight_decay=0.0001),
-    type='AmpOptimWrapper')
+# 현재 실행 중인 config 파일 경로
+_config_path = inspect.getfile(inspect.currentframe())
+# 파일명만 추출 (확장자 .py 제외)
+_cfg_name = os.path.splitext(os.path.basename(_config_path))[0]
 
-param_scheduler = [
-    dict(begin=0, by_epoch=True, end=5, start_factor=0.1, type='LinearLR'),
-    dict(
-    type='CosineAnnealingLR',
-    by_epoch=True, 
-    T_max=100,
-    eta_min=1e-6)
-    ]
+# work_dir에 동적으로 추가
+work_dir = os.path.join(
+    '..', 'work_dirs', 'lstv_classification_v2', _cfg_name
+)
 
-# train, val, test setting
-train_cfg = dict(by_epoch=True, max_epochs=100, val_interval=5)
 
-work_dir = '../work_dirs/lstv_classification_v2/fold_0'
+
 auto_scale_lr = dict(base_batch_size=256)
 
-# randomness = dict(deterministic=True, seed=42)
-# configure default hooks
-default_hooks = dict(
-    # save checkpoint per epoch.
-    checkpoint=dict(type='CheckpointHook', interval=5),
-)
+val_evaluator = [dict(type='Accuracy', thrs=0.5, collect_device='gpu'),
+                dict(type='SingleLabelMetric', 
+                     thrs = 0.5, 
+                     num_classes=2, 
+                     average = None,
+                     collect_device = 'gpu'
+                     ),
+                 dict(type='ConfusionMatrix',
+                     num_classes=2,
+                     collect_device='gpu'
+                     ),
+                 dict(out_file_path= work_dir + '/val_results.pkl', type='DumpResults')]
+
+test_evaluator =[dict(type='Accuracy', thrs=0.5, collect_device='gpu'),
+                dict(type='SingleLabelMetric', 
+                     thrs = 0.5, 
+                     num_classes=2, 
+                     average = None,
+                     collect_device = 'gpu'
+                     ),
+                 dict(type='ConfusionMatrix',
+                     num_classes=2,
+                     collect_device='gpu'
+                     ),
+                 dict(out_file_path= work_dir + '/test_results.pkl', type='DumpResults')] 
